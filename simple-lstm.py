@@ -8,6 +8,7 @@ from keras.layers import Input, Dense, Embedding, SpatialDropout1D, add, concate
 from keras.layers import CuDNNLSTM, Bidirectional, GlobalMaxPooling1D, GlobalAveragePooling1D
 from keras.preprocessing import text, sequence
 from keras.callbacks import LearningRateScheduler
+from sklearn.model_selection import train_test_split
 
 
 
@@ -65,9 +66,9 @@ def build_model(embedding_matrix, num_aux_targets):
     hidden = add([hidden, Dense(DENSE_HIDDEN_UNITS, activation='relu')(hidden)])
     hidden = add([hidden, Dense(DENSE_HIDDEN_UNITS, activation='relu')(hidden)])
     result = Dense(1, activation='sigmoid')(hidden)
-    aux_result = Dense(num_aux_targets, activation='sigmoid')(hidden)
+#    aux_result = Dense(num_aux_targets, activation='sigmoid')(hidden)
     
-    model = Model(inputs=words, outputs=[result, aux_result])
+    model = Model(inputs=words, outputs=result)
     model.compile(loss='binary_crossentropy', optimizer='adam')
 
     return model
@@ -76,55 +77,71 @@ def build_model(embedding_matrix, num_aux_targets):
 train_df = pd.read_csv('./train_preprocessed.csv')
 test_df = pd.read_csv('./test_preprocessed.csv')
 print("test and train data imported.")
-x_train = train_df[TEXT_COLUMN].astype(str)
-y_train = train_df[TARGET_COLUMN].values
-y_aux_train = train_df[AUX_COLUMNS].values
+
+X = train_df[TEXT_COLUMN].astype(str)
+Y = train_df[TARGET_COLUMN].values
+ID = train_df['id'].values
+#y_aux_train = train_df[AUX_COLUMNS].values
 x_test = test_df[TEXT_COLUMN].astype(str)
 
 for column in IDENTITY_COLUMNS + [TARGET_COLUMN]:
     train_df[column] = np.where(train_df[column] >= 0.5, True, False)
 
+x_train, x_validate, y_train, y_validate ,id_train,id_validate = train_test_split(X, Y, ID,test_size=0.2, shuffle=False)
+
 tokenizer = text.Tokenizer(filters=CHARS_TO_REMOVE)
-tokenizer.fit_on_texts(list(x_train) + list(x_test))
+tokenizer.fit_on_texts(list(x_train)+list(x_validate)+list(x_test))
 
 x_train = tokenizer.texts_to_sequences(x_train)
+x_validate = tokenizer.texts_to_sequences(x_validate)
 x_test = tokenizer.texts_to_sequences(x_test)
+
 x_train = sequence.pad_sequences(x_train, maxlen=MAX_LEN)
+x_validate = sequence.pad_sequences(x_validate, maxlen=MAX_LEN)
 x_test = sequence.pad_sequences(x_test, maxlen=MAX_LEN)
 print("test and train data tokenized and padded.")
-sample_weights = np.ones(len(x_train), dtype=np.float32)
-sample_weights += train_df[IDENTITY_COLUMNS].sum(axis=1)
-sample_weights += train_df[TARGET_COLUMN] * (~train_df[IDENTITY_COLUMNS]).sum(axis=1)
-sample_weights += (~train_df[TARGET_COLUMN]) * train_df[IDENTITY_COLUMNS].sum(axis=1) * 5
-sample_weights /= sample_weights.mean()
-print("test and train data weighted.")
+#sample_weights = np.ones(len(x_train), dtype=np.float32)
+#sample_weights += train_df[IDENTITY_COLUMNS].sum(axis=1)
+#sample_weights += train_df[TARGET_COLUMN] * (~train_df[IDENTITY_COLUMNS]).sum(axis=1)
+#sample_weights += (~train_df[TARGET_COLUMN]) * train_df[IDENTITY_COLUMNS].sum(axis=1) * 5
+#sample_weights /= sample_weights.mean()
+#print("test and train data weighted.")
 embedding_matrix = np.concatenate(
     [build_matrix(tokenizer.word_index, f) for f in EMBEDDING_FILES], axis=-1)
 
 checkpoint_predictions = []
+checkpoint_validations = []
 weights = []
 
 for model_idx in range(NUM_MODELS):
-    model = build_model(embedding_matrix, y_aux_train.shape[-1])
+    model = build_model(embedding_matrix, 1)
     for global_epoch in range(EPOCHS):
         model.fit(
             x_train,
-            [y_train, y_aux_train],
+            y_train,
             batch_size=BATCH_SIZE,
             epochs=1,
             verbose=2,
-            sample_weight=[sample_weights.values, np.ones_like(sample_weights)],
+            validation_data=(x_validate,y_validate),
+#            sample_weight=[sample_weights.values, np.ones_like(sample_weights)],
             callbacks=[
                 LearningRateScheduler(lambda _: 1e-3 * (0.55 ** global_epoch))
             ]
         )
-        checkpoint_predictions.append(model.predict(x_test, batch_size=2048)[0].flatten())
+        checkpoint_predictions.append(model.predict(x_test, batch_size=2048).flatten())
+        checkpoint_validations.append(model.predict(x_validate, batch_size=2048).flatten())
         weights.append(2 ** global_epoch)
-    print("model_idx",model_idx,"built")
 predictions = np.average(checkpoint_predictions, weights=weights, axis=0)
+validations = np.average(checkpoint_validations, weights=weights, axis=0)
 
 submission = pd.DataFrame.from_dict({
     'id': test_df.id,
     'prediction': predictions
 })
-submission.to_csv('submission.csv', index=False)
+submission.to_csv('submission1.csv', index=False)
+
+submission = pd.DataFrame.from_dict({
+    'id': id_validate,
+    'validation': validations
+})
+submission.to_csv('validation.csv', index=False)
