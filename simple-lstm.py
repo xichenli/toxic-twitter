@@ -17,7 +17,7 @@ EMBEDDING_FILES = [
     './raw_data/crawl-300d-2M.vec',
     './raw_data/glove.840B.300d.txt'
 ]
-NUM_MODELS = 1
+NUM_MODELS = 2
 BATCH_SIZE = 512
 LSTM_UNITS = 128
 DENSE_HIDDEN_UNITS = 4 * LSTM_UNITS
@@ -304,7 +304,7 @@ def build_model(embedding_matrix, aux_target):
     return model
     
 def create_mask(df):
-    mask_tot = []
+    masks_tot = []
     for identity in IDENTITY_COLUMNS:
         mask0 = df[identity]
         mask1 = (df[identity] & (df['target']<0)) | (~df[identity] & (df['target']>0))
@@ -315,7 +315,7 @@ def create_mask(df):
         masks_tot.append(mask2.values*1.0)
     masks_tot = np.array(masks_tot).T    
     print("masks_tot shape",masks_tot.shape)
-    return mask_tot
+    return masks_tot
 
 train = pd.read_csv('./train_preprocessed.csv')
 for column in IDENTITY_COLUMNS:
@@ -323,12 +323,10 @@ for column in IDENTITY_COLUMNS:
 train['target'] = np.where(train[column] >= 0.5,1.0,-1.0)
 #Seperate it into train and validation set
 
-end = 64000
+end = 6400
 split = int(end*0.8)
 validate_df = train.iloc[split:end]
 train_df = train.iloc[:split]
-validate_mask = masks_tot[split:end]
-train_mask = masks_tot[:split]
 print("validate_df shape",validate_df.shape)
 print("train_df shape",train_df.shape)
 test_df = pd.read_csv('./test_preprocessed.csv')
@@ -347,7 +345,7 @@ x_test = test_df[TEXT_COLUMN].astype(str)
 
 train_mask = create_mask(train_df)
 validate_mask = create_mask(validate_df)
-test_mask = np.array((x_test.shape[0],len(IDENTITY_COLUMNS)*3))
+test_mask = np.zeros((x_test.shape[0],len(IDENTITY_COLUMNS)*3))
 
 tokenizer = text.Tokenizer(filters=CHARS_TO_REMOVE)
 tokenizer.fit_on_texts(list(x_train)+list(x_validate)+list(x_test))
@@ -380,7 +378,7 @@ for model_idx in range(NUM_MODELS):
     model = build_model(embedding_matrix, model_idx)
     for global_epoch in range(EPOCHS):
         model.fit(
-            [x_train,masks_tot],
+            [x_train,train_mask],
             y_aux_train[:,model_idx],
             batch_size=BATCH_SIZE,
             epochs=1,
