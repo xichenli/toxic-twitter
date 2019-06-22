@@ -9,16 +9,13 @@ from keras.layers import Input, Dense, Embedding, SpatialDropout1D, add, concate
 from keras.layers import CuDNNLSTM, Bidirectional, GlobalMaxPooling1D, GlobalAveragePooling1D
 from keras.preprocessing import text, sequence
 from keras.callbacks import LearningRateScheduler
-from sklearn.model_selection import train_test_split
-from sklearn import metrics
 
 
 EMBEDDING_FILES = [
     './raw_data/crawl-300d-2M.vec',
     './raw_data/glove.840B.300d.txt'
 ]
-NUM_MODELS = 2
-BATCH_SIZE = 512
+BATCH_SIZE = 2048
 LSTM_UNITS = 128
 DENSE_HIDDEN_UNITS = 4 * LSTM_UNITS
 EPOCHS = 4
@@ -27,7 +24,10 @@ IDENTITY_COLUMNS = [
     'male', 'female', 'homosexual_gay_or_lesbian', 'christian', 'jewish',
     'muslim', 'black', 'white', 'psychiatric_or_mental_illness'
 ]
-AUX_COLUMNS = ['target','severe_toxicity', 'obscene', 'identity_attack', 'insult', 'threat']
+NUM_MASKS = len(IDENTITY_COLUMNS)*3
+#AUX_COLUMNS = ['severe_toxicity', 'obscene', 'identity_attack', 'insult', 'threat']
+AUX_COLUMNS = ['severe_toxicity']
+NUM_TARGETS = len(AUX_COLUMNS)
 TEXT_COLUMN = 'comment_text'
 TARGET_COLUMN = 'target'
 CHARS_TO_REMOVE = '!"#$%&()*+,-./:;<=>?@[\\]^_`{|}~\t\n“”’\'∞θ÷α•à−β∅³π‘₹´°£€\×™√²—'
@@ -108,56 +108,6 @@ def expand_outer(tensor, rank):
     tensor = tf.expand_dims(tensor, 0)
   return tensor
 
-
-def build_label_priors(labels,
-                       weights=None,
-                       positive_pseudocount=1.0,
-                       negative_pseudocount=1.0,
-                       variables_collections=None):
-  dtype = labels.dtype.base_dtype
-  num_labels = get_num_labels(labels)
-
-  if weights is None:
-    weights = tf.ones_like(labels)
-
-  # We disable partitioning while constructing dual variables because they will
-  # be updated with assign, which is not available for partitioned variables.
-  partitioner = tf.get_variable_scope().partitioner
-  try:
-    tf.get_variable_scope().set_partitioner(None)
-    # Create variable and update op for weighted label counts.
-    weighted_label_counts = tf.contrib.framework.model_variable(
-        name='weighted_label_counts',
-        shape=[num_labels],
-        dtype=dtype,
-        initializer=tf.constant_initializer(
-            [positive_pseudocount] * num_labels, dtype=dtype),
-        collections=variables_collections,
-        trainable=False)
-    weighted_label_counts_update = weighted_label_counts.assign_add(
-        tf.reduce_sum(weights * labels, 0))
-
-    # Create variable and update op for the sum of the weights.
-    weight_sum = tf.contrib.framework.model_variable(
-        name='weight_sum',
-        shape=[num_labels],
-        dtype=dtype,
-        initializer=tf.constant_initializer(
-            [positive_pseudocount + negative_pseudocount] * num_labels,
-            dtype=dtype),
-        collections=variables_collections,
-        trainable=False)
-    weight_sum_update = weight_sum.assign_add(tf.reduce_sum(weights, 0))
-
-  finally:
-    tf.get_variable_scope().set_partitioner(partitioner)
-
-  label_priors = tf.div(
-      weighted_label_counts_update,
-      weight_sum_update)
-  return label_priors
-
-
 def convert_and_cast(value, name, dtype):
   return tf.cast(tf.convert_to_tensor(value, name=name), dtype=dtype)
 
@@ -175,15 +125,6 @@ def prepare_loss_args(labels, logits, positive_weights, negative_weights):
                                       logits.dtype)
   negative_weights = expand_outer(negative_weights, logits.get_shape().ndims)
   return labels, logits, positive_weights, negative_weights
-
-
-def get_num_labels(labels_or_logits):
-  """Returns the number of labels inferred from labels_or_logits."""
-  if labels_or_logits.get_shape().ndims <= 1:
-    return 1
-  return labels_or_logits.get_shape()[1].value
-
-
 
 
 # ------------------------------- customized differentiable AUC calculation --------------#
@@ -225,6 +166,12 @@ def roc_auc_loss(
     labels, logits, weights, original_shape = _prepare_labels_logits_weights(
         labels, logits, weights)
 
+    labels_weights_prduct = labels * weights 
+    ApB = tf.to_float(tf.count_nonzero(labels_weights_prduct))
+    AmB = tf.reduce_sum(labels_weights_prduct)
+    Np = 0.5 * (ApB + AmB)
+    Nm = 0.5 * (ApB - AmB)
+
     logits_difference = tf.expand_dims(logits, 0) - tf.expand_dims(logits, 1)
     labels_difference = tf.expand_dims(labels, 0) - tf.expand_dims(labels, 1)
     weights_product = tf.expand_dims(weights, 0) * tf.expand_dims(weights, 1)
@@ -236,33 +183,35 @@ def roc_auc_loss(
         surrogate_type=surrogate_type)
     weighted_loss = weights_product * raw_loss
 
-    loss = tf.reduce_mean(tf.abs(labels_difference) * weighted_loss, 0) * 0.5
+    loss = tf.reduce_sum(tf.abs(labels_difference) * weighted_loss) * 0.5/(Np+10e-12)/(Nm+10e-12)
+    return loss
 #    loss = tf.reshape(loss, original_shape)
-    return tf.reshape(tf.reduce_sum(loss),[-1])
+#    return tf.reshape(tf.reduce_sum(loss),[-1])
 
 # ---------------------- masks is a 2D python list that contains all mask including (G+ and G-) (G+ and B-) (G- and B+) ---#
-# attention: I am training the model so that y_pred = logit(probability)
+# attention: I am training the model so that the result is actually the logit of probability. y_pred = logit(probability).
+# real probability = sigmoid(y_pred)
 def custom_loss(splitted_masks):
-    def AUC(y_true,y_pred,mask):
-        return roc_auc_loss(y_true,y_pred,weights=mask)
-
     def loss(y_true,y_pred):
-#        AUC_all = roc_auc_loss(y_true,y_pred)
-        AUC_id = roc_auc_loss(y_true,y_pred,splitted_masks[0])
-#        return tf.reduce_mean(AUCs)*3+AUC_all
-#        return tf.add(AUC_all,AUC_id)
-        return AUC_id
+        AUC_all = roc_auc_loss(y_true,y_pred)
+#        AUC_buff = tf.zeros(shape=[1,NUM_MASKS],dtype=tf.float32)
+#        AUC_values = tf.split(AUC_buff,NUM_MASKS,axis=1)
+        AUC_values = [roc_auc_loss(labels=y_true,logits=y_pred,weights=splitted_masks[i]) for i in range(NUM_MASKS)]
+        AUC_array = tf.reshape(tf.stack(AUC_values),[-1,3])
+        Matrix2 = tf.ones_like(AUC_ARRAY)*2.0
+        AUC_pow = tf.pow(AUC_array,Matrix2)
+        AUC_mean = tf.sqrt(tf.reduce_mean(AUC_pow,axis=0))
+#        return AUC_all#+tf.reduce_sum(AUC_means)
+        return AUC_all+tf.reduce_sum(AUC_mean)
     return loss
 # ---------------------------------------------------------------------------------------------------------------------------#
 
 def get_coefs(word, *arr):
     return word, np.asarray(arr, dtype='float32')
 
-
 def load_embeddings(path):
     with open(path) as f:
         return dict(get_coefs(*line.strip().split(' ')) for line in f)
-
 
 def build_matrix(word_index, path):
     embedding_index = load_embeddings(path)
@@ -273,12 +222,12 @@ def build_matrix(word_index, path):
         except KeyError:
             pass
     return embedding_matrix
-    
 
-def build_model(embedding_matrix, aux_target):
+def build_model(embedding_matrix, target):
     words = Input(shape=(None,))
+    # masks shape is (n_sample,n_identity*3)
     masks = Input(shape=(None,))
-    splitted_masks = tf.split(masks,len(IDENTITY_COLUMNS)*3,axis=1)
+    splitted_masks = tf.split(masks,NUM_MASKS,axis=1)
     x = Embedding(*embedding_matrix.shape, weights=[embedding_matrix], trainable=False)(words)
     x = SpatialDropout1D(0.2)(x)
     x = Bidirectional(CuDNNLSTM(LSTM_UNITS, return_sequences=True))(x)
@@ -292,17 +241,35 @@ def build_model(embedding_matrix, aux_target):
     hidden = add([hidden, Dense(DENSE_HIDDEN_UNITS, activation='relu')(hidden)])
 #    result = Dense(1, activation='sigmoid')(hidden)
 #    aux_result = Dense(num_aux_targets, activation='sigmoid')(hidden)
-    if aux_target==0:
-        result = Dense(1, activation=None)(hidden)
-        model = Model(inputs=[words,masks], outputs=result)
-        model.compile(loss=custom_loss(splitted_masks), optimizer='adam')
-    else:
-        result = Dense(1, activation='sigmoid')(hidden)
-        model = Model(inputs=[words,masks], outputs=result)
-        model.compile(loss='mean_squared_error', optimizer='adam')
-
+    # it to predict the target, y_pred is logit and use custom loss
+    result = Dense(1, activation=None)(hidden)
+    model = Model(inputs=[words,masks], outputs=result)
+    model.compile(loss=custom_loss(splitted_masks), optimizer='adam')
     return model
-    
+
+def build_aux_model(embedding_matrix, aux_target):
+    words = Input(shape=(None,))
+    # masks shape is (n_sample,n_identity*3)
+    x = Embedding(*embedding_matrix.shape, weights=[embedding_matrix], trainable=False)(words)
+    x = SpatialDropout1D(0.2)(x)
+    x = Bidirectional(CuDNNLSTM(LSTM_UNITS, return_sequences=True))(x)
+    x = Bidirectional(CuDNNLSTM(LSTM_UNITS, return_sequences=True))(x)
+
+    hidden = concatenate([
+        GlobalMaxPooling1D()(x),
+        GlobalAveragePooling1D()(x),
+    ])
+    hidden = add([hidden, Dense(DENSE_HIDDEN_UNITS, activation='relu')(hidden)])
+    hidden = add([hidden, Dense(DENSE_HIDDEN_UNITS, activation='relu')(hidden)])
+#    result = Dense(1, activation='sigmoid')(hidden)
+#    aux_result = Dense(num_aux_targets, activation='sigmoid')(hidden)
+    # it to predict the target, y_pred is logit and use custom loss
+    result = Dense(1, activation='sigmoid')(hidden)
+    model = Model(inputs=words, outputs=result)
+    model.compile(loss='mean_squared_error', optimizer='adam')
+    return model
+
+# --------------- Below are functions for data splitting, rearranging -------------------------- #   
 def create_mask(df):
     masks_tot = []
     for identity in IDENTITY_COLUMNS:
@@ -317,48 +284,73 @@ def create_mask(df):
     print("masks_tot shape",masks_tot.shape)
     return masks_tot
 
+# rearrange the train data so that all batches are stratified according to the subgroup percentage
+def shuffle_data(df):
+    index_df = pd.Series()
+    df['no_id'] = ~(df[IDENTITY_COLUMNS].any(axis=1))
+    # indices of samples in each subgroup
+    for identity in IDENTITY_COLUMNS+['no_id']:
+        index_df[identity] = list(df[df[identity]].index.values)
+    id_count = df[IDENTITY_COLUMNS].sum(axis=0)
+    id_percent = id_count/df.shape[0]
+    id_adjust = pd.Series({'black':0.577346,'christian':0.707853,'female':0.643827,'homosexual_gay_or_lesbian':0.596602,'jewish':0.555163,'male':0.582412,'muslim':0.657584,'psychiatric_or_mental_illness':0.786419,'white':0.609867})
+    id_perbatch = id_percent*BATCH_SIZE*id_adjust
+    # build a new dataset batch by batch
+    sample_index = []
+    n_batch = int(df.shape[0]/float(BATCH_SIZE)*1.1)
+    print("n_batch=",n_batch,"total samples in new df",n_batch*BATCH_SIZE)
+    for i in range(n_batch):
+        count_samples = 0
+        for identity in IDENTITY_COLUMNS:
+            n_samples = int(round(id_perbatch[identity]))+i%2
+            count_samples = count_samples +n_samples
+            sample_index = sample_index+(np.random.choice(index_df[identity],n_samples)).tolist()
+        # fill the remaining with sample that has no identity
+        remaining_count = BATCH_SIZE-count_samples
+        sample_index = sample_index+(np.random.choice(index_df['no_id'],remaining_count)).tolist()
+    new_df = df.loc[sample_index,:]
+    return new_df
+# --------------------------------------------------------------------------------------------------#
+
 train = pd.read_csv('./train_preprocessed.csv')
 for column in IDENTITY_COLUMNS:
     train[column] = np.where(train[column] >= 0.5, True, False)
 train['target'] = np.where(train[column] >= 0.5,1.0,-1.0)
+train = shuffle_data(train)
 #Seperate it into train and validation set
-
-end = 6400
-split = int(end*0.8)
-validate_df = train.iloc[split:end]
-train_df = train.iloc[:split]
-print("validate_df shape",validate_df.shape)
-print("train_df shape",train_df.shape)
+t_nbatch = 10
+v_nbatch = 12
+train_df = train.iloc[:(t_nbatch*BATCH_SIZE)]
+validate_df = train.iloc[(t_nbatch*BATCH_SIZE):(v_nbatch*BATCH_SIZE)]
 test_df = pd.read_csv('./test_preprocessed.csv')
-print("test and train data imported.")
 
 x_train = train_df[TEXT_COLUMN].astype(str)
 y_train = train_df[TARGET_COLUMN].values
+y_aux_train = train_df[AUX_COLUMNS].values
+train_mask = create_mask(train_df)
+
 x_validate = validate_df[TEXT_COLUMN].astype(str)
 y_validate = validate_df[TARGET_COLUMN].values
-
-y_aux_train = train_df[AUX_COLUMNS].values
 y_aux_validate = validate_df[AUX_COLUMNS].values
+validate_mask = create_mask(validate_df)
 
 x_test = test_df[TEXT_COLUMN].astype(str)
-
-
-train_mask = create_mask(train_df)
-validate_mask = create_mask(validate_df)
-test_mask = np.zeros((x_test.shape[0],len(IDENTITY_COLUMNS)*3))
+# test mask is not necessary, just to make it consistent with model input
+test_mask = np.zeros((x_test.shape[0],NUM_MASKS))
 
 tokenizer = text.Tokenizer(filters=CHARS_TO_REMOVE)
 tokenizer.fit_on_texts(list(x_train)+list(x_validate)+list(x_test))
 
 x_train = tokenizer.texts_to_sequences(x_train)
-x_validate = tokenizer.texts_to_sequences(x_validate)
-x_test = tokenizer.texts_to_sequences(x_test)
-
 x_train = sequence.pad_sequences(x_train, maxlen=MAX_LEN)
+
+x_validate = tokenizer.texts_to_sequences(x_validate)
 x_validate = sequence.pad_sequences(x_validate, maxlen=MAX_LEN)
+
+x_test = tokenizer.texts_to_sequences(x_test)
 x_test = sequence.pad_sequences(x_test, maxlen=MAX_LEN)
-print("x_train shape",x_train.shape)
-print("x_validate shape",x_validate.shape)
+print("x_train shape",x_train.shape,"y_train,y_aux_train shape",y_train.shape,y_aux_train.shape)
+print("x_validate shape",x_validate.shape,"y_vali,y_aux_vali shape",y_validate.shape,y_aux_validate.shape)
 print("test and train data tokenized and padded.")
 #sample_weights = np.ones(len(x_train), dtype=np.float32)
 #sample_weights += train_df[IDENTITY_COLUMNS].sum(axis=1)
@@ -371,18 +363,23 @@ embedding_matrix = np.concatenate(
 
 predictions = {}
 validations = {}
-for model_idx in range(NUM_MODELS):
+trainhats = {}
+# ------------------------ train the aux values ---------------------- #
+for target_idx in range(NUM_TARGETS):
+    print("predicting",AUX_COLUMNS[target_idx])
     checkpoint_predictions = []
     checkpoint_validations = []
+    checkpoint_trainhats = []
     weights = []
-    model = build_model(embedding_matrix, model_idx)
+    model = build_aux_model(embedding_matrix, target_idx)
     for global_epoch in range(EPOCHS):
         model.fit(
-            [x_train,train_mask],
-            y_aux_train[:,model_idx],
+            x_train,
+            y_aux_train[:,target_idx],
             batch_size=BATCH_SIZE,
             epochs=1,
             verbose=2,
+            shuffle=False,
             validation_data=None,
             validation_steps=None,
 #            validation_data=(x_validate,y_validate),
@@ -391,11 +388,45 @@ for model_idx in range(NUM_MODELS):
                 LearningRateScheduler(lambda _: 1e-3 * (0.55 ** global_epoch))
             ]
         )
-        checkpoint_predictions.append(model.predict([x_test,test_mask], batch_size=2048).flatten())
-        checkpoint_validations.append(model.predict([x_validate,validate_mask], batch_size=2048).flatten())
+        checkpoint_predictions.append(model.predict(x_test, batch_size=2048).flatten())
+        checkpoint_validations.append(model.predict(x_validate, batch_size=2048).flatten())
+        checkpoint_trainhats.append(model.predict(x_train, batch_size=2048).flatten())
         weights.append(2 ** global_epoch)
-    predictions[AUX_COLUMNS[model_idx]] = np.average(checkpoint_predictions, weights=weights, axis=0)
-    validations[AUX_COLUMNS[model_idx]] = np.average(checkpoint_validations, weights=weights, axis=0)
+    predictions[AUX_COLUMNS[target_idx]] = np.average(checkpoint_predictions, weights=weights, axis=0)
+    validations[AUX_COLUMNS[target_idx]] = np.average(checkpoint_validations, weights=weights, axis=0)
+    trainhats[AUX_COLUMNS[target_idx]] = np.average(checkpoint_trainhats, weights=weights, axis=0)
+
+# ---------------------------- train toxicity score ---------------------- #
+checkpoint_predictions = []
+checkpoint_validations = []
+checkpoint_trainhats = []
+weights = []
+model = build_model(embedding_matrix, target_idx)
+print("predicting score")
+for global_epoch in range(EPOCHS):
+    model.fit(
+        [x_train,train_mask],
+        y_train,
+        batch_size=BATCH_SIZE,
+        epochs=1,
+        verbose=2,
+        shuffle=False,
+        validation_data=None,
+        validation_steps=None,
+#        validation_data=(x_validate,y_validate),
+#        sample_weight=[sample_weights.values, np.ones_like(sample_weights)],
+        callbacks=[
+            LearningRateScheduler(lambda _: 1e-3 * (0.55 ** global_epoch))
+        ]
+    )
+    checkpoint_predictions.append(model.predict([x_test,test_mask], batch_size=2048).flatten())
+    checkpoint_validations.append(model.predict([x_validate,validate_mask], batch_size=2048).flatten())
+    checkpoint_trainhats.append(model.predict([x_train,train_mask], batch_size=2048).flatten())
+    weights.append(2 ** global_epoch)
+predictions['score'] = np.average(checkpoint_predictions, weights=weights, axis=0)
+validations['score'] = np.average(checkpoint_validations, weights=weights, axis=0)
+trainhats['score'] = np.average(checkpoint_trainhats, weights=weights, axis=0)
+# ------------------------------------------------------------------------------#
 """
 submission = pd.DataFrame.from_dict({
     'id': test_df.id,
@@ -404,6 +435,11 @@ submission = pd.DataFrame.from_dict({
 submission.to_csv('submission_custom.csv', index=False)
 """
 validations['id'] = validate_df.id
-validations['target'] = scipy.special.expit(validations['target'])
+validations['score'] = scipy.special.expit(validations['score'])
 submission = pd.DataFrame.from_dict(validations)
 submission.to_csv('validation_custom.csv', index=False)
+
+trainhats['id'] = train_df.id
+trainhats['score'] = scipy.special.expit(trainhats['score'])
+submission = pd.DataFrame.from_dict(trainhats)
+submission.to_csv('trainhat_custom.csv', index=False)
