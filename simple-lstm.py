@@ -194,15 +194,11 @@ def roc_auc_loss(
 def custom_loss(splitted_masks):
     def loss(y_true,y_pred):
         AUC_all = roc_auc_loss(y_true,y_pred)
-#        AUC_buff = tf.zeros(shape=[1,NUM_MASKS],dtype=tf.float32)
-#        AUC_values = tf.split(AUC_buff,NUM_MASKS,axis=1)
         AUC_values = [roc_auc_loss(labels=y_true,logits=y_pred,weights=splitted_masks[i]) for i in range(NUM_MASKS)]
         AUC_array = tf.reshape(tf.stack(AUC_values),[-1,3])
-        Matrix2 = tf.ones_like(AUC_ARRAY)*2.0
-        AUC_pow = tf.pow(AUC_array,Matrix2)
-        AUC_mean = tf.sqrt(tf.reduce_mean(AUC_pow,axis=0))
-#        return AUC_all#+tf.reduce_sum(AUC_means)
-        return AUC_all+tf.reduce_sum(AUC_mean)
+        Matrix_5 = tf.ones_like(AUC_ARRAY)*5.0
+        AUC_mean = tf.reduce_mean(tf.pow(AUC_array,Matrix5),axis=0)
+        return tf.pow(AUC_all,5)+tf.reduce_sum(AUC_root)
     return loss
 # ---------------------------------------------------------------------------------------------------------------------------#
 
