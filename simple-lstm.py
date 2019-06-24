@@ -9,7 +9,9 @@ from keras.layers import Input, Dense, Embedding, SpatialDropout1D, add, concate
 from keras.layers import CuDNNLSTM, Bidirectional, GlobalMaxPooling1D, GlobalAveragePooling1D
 from keras.preprocessing import text, sequence
 from keras.callbacks import LearningRateScheduler
-
+import copy,re
+from keras.preprocessing.text import text_to_word_sequence
+from nltk import WordNetLemmatizer
 
 EMBEDDING_FILES = [
     './raw_data/crawl-300d-2M.vec',
@@ -18,19 +20,241 @@ EMBEDDING_FILES = [
 BATCH_SIZE = 2048
 LSTM_UNITS = 128
 DENSE_HIDDEN_UNITS = 4 * LSTM_UNITS
-EPOCHS = 4
+EPOCHS = 16
 MAX_LEN = 220
 IDENTITY_COLUMNS = [
     'male', 'female', 'homosexual_gay_or_lesbian', 'christian', 'jewish',
     'muslim', 'black', 'white', 'psychiatric_or_mental_illness'
 ]
 NUM_MASKS = len(IDENTITY_COLUMNS)*3
-#AUX_COLUMNS = ['severe_toxicity', 'obscene', 'identity_attack', 'insult', 'threat']
+AUX_COLUMNS = ['severe_toxicity', 'obscene', 'identity_attack', 'insult', 'threat']
 AUX_COLUMNS = ['severe_toxicity']
 NUM_TARGETS = len(AUX_COLUMNS)
 TEXT_COLUMN = 'comment_text'
 TARGET_COLUMN = 'target'
 CHARS_TO_REMOVE = '!"#$%&()*+,-./:;<=>?@[\\]^_`{|}~\t\n“”’\'∞θ÷α•à−β∅³π‘₹´°£€\×™√²—'
+
+
+# ------------------------ Data preprocessing -----------------------------#
+class BaseTokenizer(object):
+    def __init__(self):
+        print("BaseTokenizer")
+    def process_text(self, text):
+        raise NotImplemented
+
+    def process(self, texts):
+        for text in texts:
+            yield self.process_text(text)
+
+
+RE_PATTERNS = {
+    ' will not ':['wont','won\'t'],
+    ' i am ':['i\'m'],
+    ' is not ':['ain\'t'],
+    ' will ':['\'ll'],
+    ' not ':['n\'t'],
+    ' have ':['\'ve'],
+    ' is ':['\'s'],
+    ' would ':['\'d'],
+    ' and ':['&'],
+    ' damn it ':['dammit'],
+    ' do not ':['dont'],
+    ' cannot ':['can\'t'],
+    ' american ':
+        [
+            'amerikan'
+        ],
+    ' adolf ':
+        [
+            'adolf'
+        ],
+    ' hitler ':
+        [
+            'hitler'
+        ],
+    ' fuck':
+        [
+            '(f)(u|[^a-z0-9 ])(c|[^a-z0-9 ])(k|[^a-z0-9 ])([^ ])*',
+            '(f)([^a-z]*)(u)([^a-z]*)(c)([^a-z]*)(k)',
+            ' f[!@#\$%\^\&\*]*u[!@#\$%\^&\*]*k', 'f u u c',
+            '(f)(c|[^a-z ])(u|[^a-z ])(k)', r'f\*',
+            'feck ', ' fux ', 'f\*\*', 
+            'f\-ing', 'f\.u\.', 'f###', ' fu ', 'f@ck', 'f u c k', 'f uck', 'f ck'
+        ],
+    ' ass ':
+        [
+            '[^a-z]ass ', '[^a-z]azz ', 'arrse', ' arse ', '@\$\$'
+                                                           '[^a-z]anus', ' a\*s\*s', '[^a-z]ass[^a-z ]',
+            'a[@#\$%\^&\*][@#\$%\^&\*]', '[^a-z]anal ', 'a s s'
+        ],
+    ' ass hole ':
+        [
+            ' a[s|z]*wipe', 'a[s|z]*[w]*h[o|0]+[l]*e', '@\$\$hole'
+        ],
+    ' bitch ':
+        [
+            'b[w]*i[t]*ch', 'b!tch',
+            'bi\+ch', 'b!\+ch', '(b)([^a-z]*)(i)([^a-z]*)(t)([^a-z]*)(c)([^a-z]*)(h)',
+            'biatch', 'bi\*\*h', 'bytch', 'b i t c h'
+        ],
+    ' bastard ':
+        [
+            'ba[s|z]+t[e|a]+rd'
+        ],
+    ' trans gender':
+        [
+            'transgender'
+        ],
+    ' gay ':
+        [
+            'gay'
+        ],
+    ' cock ':
+        [
+            '[^a-z]cock', 'c0ck', '[^a-z]cok ', 'c0k', '[^a-z]cok[^aeiou]', ' cawk',
+            '(c)([^a-z ])(o)([^a-z ]*)(c)([^a-z ]*)(k)', 'c o c k'
+        ],
+    ' dick ':
+        [
+            ' dick[^aeiou]', 'deek', 'd i c k'
+        ],
+    ' suck ':
+        [
+            'sucker', '(s)([^a-z ]*)(u)([^a-z ]*)(c)([^a-z ]*)(k)', 'sucks', '5uck', 's u c k'
+        ],
+    ' cunt ':
+        [
+            'cunt', 'c u n t'
+        ],
+    ' bull shit ':
+        [
+            'bullsh\*t', 'bull\$hit'
+        ],
+    ' homo sex ual':
+        [
+            'homosexual'
+        ],
+    ' jerk ':
+        [
+            'jerk'
+        ],
+    ' idiot ':
+        [
+            'i[d]+io[t]+', '(i)([^a-z ]*)(d)([^a-z ]*)(i)([^a-z ]*)(o)([^a-z ]*)(t)', 'idiots'
+                                                                                      'i d i o t'
+        ],
+    ' dumb ':
+        [
+            '(d)([^a-z ]*)(u)([^a-z ]*)(m)([^a-z ]*)(b)'
+        ],
+    ' shit ':
+        [
+            'shitty', '(s)([^a-z ]*)(h)([^a-z ]*)(i)([^a-z ]*)(t)', 'shite', '\$hit', 's h i t'
+        ],
+    ' shit hole ':
+        [
+            'shythole'
+        ],
+    ' retard ':
+        [
+            'returd', 'retad', 'retard', 'wiktard', 'wikitud'
+        ],
+    ' rape ':
+        [
+            ' raped'
+        ],
+    ' dumb ass':
+        [
+            'dumbass', 'dubass'
+        ],
+    ' ass head':
+        [
+            'butthead'
+        ],
+    ' sex ':
+        [
+            'sexy', 's3x', 'sexuality'
+        ],
+    ' nigger ':
+        [
+            'nigger', 'ni[g]+a', ' nigr ', 'negrito', 'niguh', 'n3gr', 'n i g g e r'
+        ],
+    ' shut the fuck up':
+        [
+            'stfu'
+        ],
+    ' pussy ':
+        [
+            'pussy[^c]', 'pusy', 'pussi[^l]', 'pusses'
+        ],
+    ' faggot ':
+        [
+            'faggot', ' fa[g]+[s]*[^a-z ]', 'fagot', 'f a g g o t', 'faggit',
+            '(f)([^a-z ]*)(a)([^a-z ]*)([g]+)([^a-z ]*)(o)([^a-z ]*)(t)', 'fau[g]+ot', 'fae[g]+ot',
+        ],
+    ' mother fucker':
+        [
+            ' motha ', ' motha f', ' mother f', 'motherucker',
+        ],
+    ' whore ':
+        [
+            'wh\*\*\*', 'w h o r e'
+        ],
+}
+
+class PatternTokenizer(BaseTokenizer):
+    def __init__(self, lower=True, initial_filters=r"[^a-z0-9!@#\$%\^\&\*_\-,\.' ]", patterns=RE_PATTERNS,remove_repetitions=True):
+        self.lower = lower
+        self.patterns = patterns
+        self.initial_filters = initial_filters
+        self.remove_repetitions = remove_repetitions
+
+    def process_text(self, text):
+        x = self._preprocess(text)
+        for target, patterns in self.patterns.items():
+            for pat in patterns:
+                x = re.sub(pat, target, x)
+        x = re.sub(r"[^a-z' ]", ' ', x)
+        return x.split()
+
+    def process_ds(self, ds):
+        ### ds = Data series
+
+        # lower
+        ds = copy.deepcopy(ds)
+        if self.lower:
+            ds = ds.str.lower()
+        # remove special chars
+        if self.initial_filters is not None:
+            ds = ds.str.replace(self.initial_filters, ' ')
+        # fuuuuck => fuck
+        if self.remove_repetitions:
+            pattern = re.compile(r"(.)\1{2,}", re.DOTALL) 
+            ds = ds.str.replace(pattern, r"\1")
+
+        for target, patterns in self.patterns.items():
+            for pat in patterns:
+                ds = ds.str.replace(pat, target)
+
+        ds = ds.str.replace(r"[^a-z' ]", ' ')
+
+        return ds.str.split()
+
+    def _preprocess(self, text):
+        # lower
+        if self.lower:
+            text = text.lower()
+
+        # remove special chars
+        if self.initial_filters is not None:
+            text = re.sub(self.initial_filters, ' ', text)
+
+        # fuuuuck => fuck
+        if self.remove_repetitions:
+            pattern = re.compile(r"(.)\1{2,}", re.DOTALL)
+            text = pattern.sub(r"\1", text)
+        return text
+        
 
 #------------------------- util for global objective -----------------------#
 def weighted_sigmoid_cross_entropy_with_logits(labels,
@@ -184,9 +408,9 @@ def roc_auc_loss(
     weighted_loss = weights_product * raw_loss
 
     loss = tf.reduce_sum(tf.abs(labels_difference) * weighted_loss) * 0.5/(Np+10e-12)/(Nm+10e-12)
+    #loss = tf.reduce_mean(tf.abs(labels_difference) * weighted_loss,0) * 0.5
+    #loss = tf.reshape(loss, original_shape)
     return loss
-#    loss = tf.reshape(loss, original_shape)
-#    return tf.reshape(tf.reduce_sum(loss),[-1])
 
 # ---------------------- masks is a 2D python list that contains all mask including (G+ and G-) (G+ and B-) (G- and B+) ---#
 # attention: I am training the model so that the result is actually the logit of probability. y_pred = logit(probability).
@@ -197,8 +421,11 @@ def custom_loss(splitted_masks):
         AUC_values = [roc_auc_loss(labels=y_true,logits=y_pred,weights=splitted_masks[i]) for i in range(NUM_MASKS)]
         AUC_array = tf.reshape(tf.stack(AUC_values),[-1,3])
         Matrix_5 = tf.ones_like(AUC_array)*5.0
-        AUC_mean = tf.reduce_mean(tf.pow(AUC_array,Matrix5),axis=0)
-        return tf.pow(AUC_all,5)+tf.reduce_sum(AUC_root)
+        AUC_mean = tf.reduce_mean(tf.pow(AUC_array,Matrix_5),axis=0)
+        Matrix_inv5 =tf.ones_like(AUC_mean)*0.2
+        AUC_root = tf.pow(AUC_mean,Matrix_inv5)
+        return AUC_all+tf.reduce_sum(AUC_root)
+        #return AUC_all
     return loss
 # ---------------------------------------------------------------------------------------------------------------------------#
 
@@ -219,7 +446,7 @@ def build_matrix(word_index, path):
             pass
     return embedding_matrix
 
-def build_model(embedding_matrix, target):
+def build_model(embedding_matrix):
     words = Input(shape=(None,))
     # masks shape is (n_sample,n_identity*3)
     masks = Input(shape=(None,))
@@ -282,11 +509,11 @@ def create_mask(df):
 
 # rearrange the train data so that all batches are stratified according to the subgroup percentage
 def shuffle_data(df):
-    index_df = pd.Series()
+    index_dict = {}
     df['no_id'] = ~(df[IDENTITY_COLUMNS].any(axis=1))
     # indices of samples in each subgroup
     for identity in IDENTITY_COLUMNS+['no_id']:
-        index_df[identity] = list(df[df[identity]].index.values)
+        index_dict[identity] = list(df[df[identity]].index.values)
     id_count = df[IDENTITY_COLUMNS].sum(axis=0)
     id_percent = id_count/df.shape[0]
     id_adjust = pd.Series({'black':0.577346,'christian':0.707853,'female':0.643827,'homosexual_gay_or_lesbian':0.596602,'jewish':0.555163,'male':0.582412,'muslim':0.657584,'psychiatric_or_mental_illness':0.786419,'white':0.609867})
@@ -300,25 +527,41 @@ def shuffle_data(df):
         for identity in IDENTITY_COLUMNS:
             n_samples = int(round(id_perbatch[identity]))+i%2
             count_samples = count_samples +n_samples
-            sample_index = sample_index+(np.random.choice(index_df[identity],n_samples)).tolist()
+            sample_index = sample_index+(np.random.choice(index_dict[identity],n_samples)).tolist()
         # fill the remaining with sample that has no identity
         remaining_count = BATCH_SIZE-count_samples
-        sample_index = sample_index+(np.random.choice(index_df['no_id'],remaining_count)).tolist()
+        sample_index = sample_index+(np.random.choice(index_dict['no_id'],remaining_count)).tolist()
     new_df = df.loc[sample_index,:]
     return new_df
 # --------------------------------------------------------------------------------------------------#
 
+raw_train = pd.read_csv("./raw_data/train.csv")
+raw_test = pd.read_csv("./raw_data/test.csv")
+
+pre_tokenizer = PatternTokenizer()
+raw_train["comment_text"] = pre_tokenizer.process_ds(raw_train["comment_text"]).str.join(sep=" ")
+raw_test["comment_text"] = pre_tokenizer.process_ds(raw_test["comment_text"]).str.join(sep=" ")
+raw_train.to_csv("train_preprocessed.csv", index=False)
+raw_test.to_csv("test_preprocessed.csv", index=False)
+
 train = pd.read_csv('./train_preprocessed.csv')
+test_df = pd.read_csv('./test_preprocessed.csv')
+
 for column in IDENTITY_COLUMNS:
     train[column] = np.where(train[column] >= 0.5, True, False)
-train['target'] = np.where(train[column] >= 0.5,1.0,-1.0)
+train['target'] = np.where(train['target'] >= 0.5,1.0,-1.0)
 train = shuffle_data(train)
+
+
+
 #Seperate it into train and validation set
-t_nbatch = 10
-v_nbatch = 12
+total_batch = int(train.shape[0]/float(BATCH_SIZE)*1.1)
+t_nbatch = int(total_batch)-1
+v_nbatch = total_batch
+print("separating into train and validate","t_nbatch",t_nbatch,"v_nbatch",v_nbatch)
+print("total sample",train.shape[0],"train sample",t_nbatch*BATCH_SIZE,"validate sample",v_nbatch*BATCH_SIZE)
 train_df = train.iloc[:(t_nbatch*BATCH_SIZE)]
 validate_df = train.iloc[(t_nbatch*BATCH_SIZE):(v_nbatch*BATCH_SIZE)]
-test_df = pd.read_csv('./test_preprocessed.csv')
 
 x_train = train_df[TEXT_COLUMN].astype(str)
 y_train = train_df[TARGET_COLUMN].values
@@ -348,6 +591,13 @@ x_test = sequence.pad_sequences(x_test, maxlen=MAX_LEN)
 print("x_train shape",x_train.shape,"y_train,y_aux_train shape",y_train.shape,y_aux_train.shape)
 print("x_validate shape",x_validate.shape,"y_vali,y_aux_vali shape",y_validate.shape,y_aux_validate.shape)
 print("test and train data tokenized and padded.")
+
+max_aux = train_df[AUX_COLUMNS].max(axis=1)
+no_aux = max_aux==0
+percent_no_aux = no_aux.sum()/float(max_aux.shape[0])
+percent_has_aux = 1-percent_no_aux
+sample_weights = no_aux*percent_has_aux +(~no_aux)*percent_no_aux
+print("no aux weight",percent_has_aux,"has aux weight",percent_no_aux)
 #sample_weights = np.ones(len(x_train), dtype=np.float32)
 #sample_weights += train_df[IDENTITY_COLUMNS].sum(axis=1)
 #sample_weights += train_df[TARGET_COLUMN] * (~train_df[IDENTITY_COLUMNS]).sum(axis=1)
@@ -361,6 +611,7 @@ predictions = {}
 validations = {}
 trainhats = {}
 # ------------------------ train the aux values ---------------------- #
+"""
 for target_idx in range(NUM_TARGETS):
     print("predicting",AUX_COLUMNS[target_idx])
     checkpoint_predictions = []
@@ -379,7 +630,7 @@ for target_idx in range(NUM_TARGETS):
             validation_data=None,
             validation_steps=None,
 #            validation_data=(x_validate,y_validate),
-#            sample_weight=[sample_weights.values, np.ones_like(sample_weights)],
+            sample_weight=sample_weights.values,
             callbacks=[
                 LearningRateScheduler(lambda _: 1e-3 * (0.55 ** global_epoch))
             ]
@@ -391,13 +642,13 @@ for target_idx in range(NUM_TARGETS):
     predictions[AUX_COLUMNS[target_idx]] = np.average(checkpoint_predictions, weights=weights, axis=0)
     validations[AUX_COLUMNS[target_idx]] = np.average(checkpoint_validations, weights=weights, axis=0)
     trainhats[AUX_COLUMNS[target_idx]] = np.average(checkpoint_trainhats, weights=weights, axis=0)
-
+"""
 # ---------------------------- train toxicity score ---------------------- #
 checkpoint_predictions = []
 checkpoint_validations = []
 checkpoint_trainhats = []
 weights = []
-model = build_model(embedding_matrix, target_idx)
+model = build_model(embedding_matrix)
 print("predicting score")
 for global_epoch in range(EPOCHS):
     model.fit(
@@ -407,9 +658,7 @@ for global_epoch in range(EPOCHS):
         epochs=1,
         verbose=2,
         shuffle=False,
-        validation_data=None,
-        validation_steps=None,
-#        validation_data=(x_validate,y_validate),
+        validation_data=([x_validate,validate_mask],y_validate),
 #        sample_weight=[sample_weights.values, np.ones_like(sample_weights)],
         callbacks=[
             LearningRateScheduler(lambda _: 1e-3 * (0.55 ** global_epoch))
@@ -423,19 +672,22 @@ predictions['score'] = np.average(checkpoint_predictions, weights=weights, axis=
 validations['score'] = np.average(checkpoint_validations, weights=weights, axis=0)
 trainhats['score'] = np.average(checkpoint_trainhats, weights=weights, axis=0)
 # ------------------------------------------------------------------------------#
-"""
 submission = pd.DataFrame.from_dict({
     'id': test_df.id,
-    'prediction': scipy.special.expit(predictions)
+    'prediction': predictions
 })
 submission.to_csv('submission_custom.csv', index=False)
-"""
+
 validations['id'] = validate_df.id
-validations['score'] = scipy.special.expit(validations['score'])
+#validations['score'] = scipy.special.expit(validations['score'])
 submission = pd.DataFrame.from_dict(validations)
+submission['target'] = validate_df['target']
+submission[IDENTITY_COLUMNS] = validate_df[IDENTITY_COLUMNS]
 submission.to_csv('validation_custom.csv', index=False)
 
 trainhats['id'] = train_df.id
-trainhats['score'] = scipy.special.expit(trainhats['score'])
+#trainhats['score'] = scipy.special.expit(trainhats['score'])
 submission = pd.DataFrame.from_dict(trainhats)
+submission[IDENTITY_COLUMNS] = train_df[IDENTITY_COLUMNS]
+submission['target'] = train_df['target']
 submission.to_csv('trainhat_custom.csv', index=False)
