@@ -55,6 +55,7 @@ RE_PATTERNS = {
     ' not ':['n\'t'],
     ' have ':['\'ve'],
     ' is ':['\'s'],
+    ' are ':['\'re'],
     ' would ':['\'d'],
     ' and ':['&'],
     ' damn it ':['dammit'],
