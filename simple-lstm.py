@@ -554,11 +554,9 @@ train = shuffle_data(train)
 
 
 #Seperate it into train and validation set
-total_batch = int(train.shape[0]/float(BATCH_SIZE)*1.1)
-t_nbatch = int(total_batch)-1
+total_batch = int(train.shape[0]/BATCH_SIZE)
+t_nbatch = int(total_batch)-3
 v_nbatch = total_batch
-t_nbatch = 10
-v_nbatch = 12
 print("separating into train and validate","t_nbatch",t_nbatch,"v_nbatch",v_nbatch)
 print("total sample",train.shape[0],"train sample",t_nbatch*BATCH_SIZE,"validate sample",v_nbatch*BATCH_SIZE)
 train_df = train.iloc[:(t_nbatch*BATCH_SIZE)]
@@ -593,18 +591,6 @@ print("x_train shape",x_train.shape,"y_train,y_aux_train shape",y_train.shape,y_
 print("x_validate shape",x_validate.shape,"y_vali,y_aux_vali shape",y_validate.shape,y_aux_validate.shape)
 print("test and train data tokenized and padded.")
 
-max_aux = train_df[AUX_COLUMNS].max(axis=1)
-no_aux = max_aux==0
-percent_no_aux = no_aux.sum()/float(max_aux.shape[0])
-percent_has_aux = 1-percent_no_aux
-sample_weights = no_aux*percent_has_aux +(~no_aux)*percent_no_aux
-print("no aux weight",percent_has_aux,"has aux weight",percent_no_aux)
-#sample_weights = np.ones(len(x_train), dtype=np.float32)
-#sample_weights += train_df[IDENTITY_COLUMNS].sum(axis=1)
-#sample_weights += train_df[TARGET_COLUMN] * (~train_df[IDENTITY_COLUMNS]).sum(axis=1)
-#sample_weights += (~train_df[TARGET_COLUMN]) * train_df[IDENTITY_COLUMNS].sum(axis=1) * 5
-#sample_weights /= sample_weights.mean()
-#print("test and train data weighted.")
 embedding_matrix = np.concatenate(
     [build_matrix(tokenizer.word_index, f) for f in EMBEDDING_FILES], axis=-1)
 
