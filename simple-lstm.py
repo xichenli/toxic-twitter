@@ -11,7 +11,7 @@ from keras.preprocessing import text, sequence
 from keras.callbacks import LearningRateScheduler
 import copy,re
 from keras.preprocessing.text import text_to_word_sequence
-from nltk import WordNetLemmatizer
+#from nltk import WordNetLemmatizer
 
 EMBEDDING_FILES = [
     './raw_data/crawl-300d-2M.vec',
@@ -535,18 +535,16 @@ def shuffle_data(df):
     new_df = df.loc[sample_index,:]
     return new_df
 # --------------------------------------------------------------------------------------------------#
-
-raw_train = pd.read_csv("./raw_data/train.csv")
-raw_test = pd.read_csv("./raw_data/test.csv")
+raw_train = pd.read_csv("./raw_data/train.csv",delimiter=',')
+raw_test = pd.read_csv("./raw_data/test.csv",delimiter=',')
 
 pre_tokenizer = PatternTokenizer()
 raw_train["comment_text"] = pre_tokenizer.process_ds(raw_train["comment_text"]).str.join(sep=" ")
 raw_test["comment_text"] = pre_tokenizer.process_ds(raw_test["comment_text"]).str.join(sep=" ")
-raw_train.to_csv("train_preprocessed.csv", index=False)
-raw_test.to_csv("test_preprocessed.csv", index=False)
-
-train = pd.read_csv('./train_preprocessed.csv')
-test_df = pd.read_csv('./test_preprocessed.csv')
+raw_train.to_csv("train_preprocessed.csv", sep=',',index=False)
+raw_test.to_csv("test_preprocessed.csv", sep=',',index=False)
+train = pd.read_csv('./train_preprocessed.csv',delimiter=',')
+test_df = pd.read_csv('./test_preprocessed.csv',delimiter=',')
 
 for column in IDENTITY_COLUMNS:
     train[column] = np.where(train[column] >= 0.5, True, False)
@@ -559,6 +557,8 @@ train = shuffle_data(train)
 total_batch = int(train.shape[0]/float(BATCH_SIZE)*1.1)
 t_nbatch = int(total_batch)-1
 v_nbatch = total_batch
+t_nbatch = 10
+v_nbatch = 12
 print("separating into train and validate","t_nbatch",t_nbatch,"v_nbatch",v_nbatch)
 print("total sample",train.shape[0],"train sample",t_nbatch*BATCH_SIZE,"validate sample",v_nbatch*BATCH_SIZE)
 train_df = train.iloc[:(t_nbatch*BATCH_SIZE)]
